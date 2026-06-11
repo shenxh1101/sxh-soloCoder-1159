@@ -53,19 +53,32 @@ class LayerAnalyzer:
         result.deleted_file_history = all_deleted
         return result
 
+    def _compute_opaque_deletions(self, previous_paths: set, opaque_dirs: set) -> set:
+        deleted = set()
+        for opq_dir in opaque_dirs:
+            prefix = opq_dir + "/" if opq_dir else ""
+            for prev_path in previous_paths:
+                if prev_path == opq_dir:
+                    deleted.add(prev_path)
+                elif prev_path.startswith(prefix):
+                    deleted.add(prev_path)
+        return deleted
+
     def _compute_layer_diff(self, previous_state: dict, layer: LayerInfo):
         diff = LayerDiff()
         diff.layer_index = layer.index
         diff.layer_id = layer.layer_id
         diff.created_by = layer.created_by
 
-        current_file_paths = set(layer.files.keys())
         previous_paths = set(previous_state.keys())
 
-        missing_deleted = previous_paths - current_file_paths
-        diff.deleted = layer.whiteouts & previous_paths | missing_deleted
+        whiteout_known = {p for p in layer.whiteouts if p in previous_paths}
+        opaque_deleted = self._compute_opaque_deletions(previous_paths, layer.opaque_dirs)
+        diff.deleted = whiteout_known | opaque_deleted
 
         for path, size in layer.files.items():
+            if path in diff.deleted:
+                continue
             if path not in previous_state:
                 diff.added[path] = size
             elif previous_state[path] != size:
@@ -74,8 +87,8 @@ class LayerAnalyzer:
                 diff.unchanged[path] = size
 
         diff.added_dir_count = len(layer.dirs - set(previous_state.keys()))
-        diff.whiteout_count = len(layer.whiteouts & previous_paths)
-        diff.opaque_count = len(layer.opaque_dirs)
+        diff.whiteout_count = len(whiteout_known)
+        diff.opaque_count = len(opaque_deleted)
 
         return diff
 

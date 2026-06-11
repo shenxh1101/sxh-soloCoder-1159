@@ -48,11 +48,14 @@ class TreeVisualizer:
             lines.append(f"{child_prefix}{_TREE_LAST}Files: {diff.added_file_count} added, "
                          f"{diff.added_dir_count} dirs")
             if diff.deleted:
-                del_origin = ""
+                parts = []
                 if diff.whiteout_count > 0:
-                    del_origin = f" ({diff.whiteout_count} via whiteout)"
+                    parts.append(f"{diff.whiteout_count} via whiteout")
+                if diff.opaque_count > 0:
+                    parts.append(f"{diff.opaque_count} via opaque")
+                del_detail = ", ".join(parts)
                 lines.append(f"{child_prefix}{_TREE_LAST}Deleted: {diff.deleted_file_count} files "
-                             f"removed from previous layers{del_origin}")
+                             f"removed from previous layers ({del_detail})")
             lines.append(f"{child_prefix}{_TREE_LAST}Modified: {len(diff.modified)} files "
                          f"({format_size(diff.modified_size)})")
 

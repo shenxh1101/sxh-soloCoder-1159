@@ -82,12 +82,13 @@ class DockerfileAnalyzer:
         impactful_instructions = ["RUN", "COPY", "ADD"]
         impactful_from_instructions = [i for i in self.instructions if i.instruction in impactful_instructions]
 
-        if non_base_indices is not None and len(non_base_indices) >= len(impactful_from_instructions):
+        if non_base_indices and len(non_base_indices) > 0:
             use_layers = [layer_info_list[i] for i in non_base_indices]
+            match_count = min(len(impactful_from_instructions), len(use_layers))
             layer_idx = 0
             for instr in self.instructions:
                 if instr.instruction in impactful_instructions:
-                    if layer_idx < len(use_layers):
+                    if layer_idx < match_count:
                         diff = use_layers[layer_idx]
                         instr.estimated_size_added = diff.added_size
                         instr.layer_index = diff.layer_index

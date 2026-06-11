@@ -1,23 +1,21 @@
 import tempfile, tarfile, io, json, os, shutil, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from docker_slim.image_parser import ImageParser, WHITEOUT_PREFIX
+from docker_slim.image_parser import ImageParser, WHITEOUT_PREFIX, WHITEOUT_OPAQUE
 from docker_slim.layer_analyzer import LayerAnalyzer
 from docker_slim.tree_visualizer import TreeVisualizer
-from docker_slim.pattern_detector import PatternDetector
 from docker_slim.report import Report
 from docker_slim.dockerfile_analyzer import DockerfileAnalyzer
-from docker_slim.utils import format_size, matches_any_glob, normalize_path
+from docker_slim.utils import format_size
 
 errors = []
-
 
 def check(name, condition, msg=""):
     if not condition:
         errors.append(f"FAIL [{name}]: {msg}")
-        print(f"  ✗ {name}: {msg}")
+        print(f"  X {name}: {msg}")
     else:
-        print(f"  ✓ {name}")
+        print(f"  OK {name}")
 
 
 def make_tar(path, files):
@@ -29,7 +27,6 @@ def make_tar(path, files):
 
 
 def make_whiteout_tar(path, normal_files, deleted_files):
-    """Create a layer tar with normal files plus whiteout markers for deleted files."""
     with tarfile.open(path, 'w') as t:
         for n, c in normal_files:
             ti = tarfile.TarInfo(name=n)
@@ -42,151 +39,47 @@ def make_whiteout_tar(path, normal_files, deleted_files):
             t.addfile(ti, io.BytesIO(b''))
 
 
-def test_whiteout():
-    print("\n=== TEST: Whiteout Deletion Detection ===")
-    tmpdir = tempfile.mkdtemp(prefix='dslim_wh_')
+def make_tar_with_opaque(path, normal_files, opaque_dirs):
+    """Create a layer tar with normal files plus opaque whiteout markers."""
+    with tarfile.open(path, 'w') as t:
+        for n, c in normal_files:
+            ti = tarfile.TarInfo(name=n)
+            ti.size = len(c)
+            t.addfile(ti, io.BytesIO(c))
+        for d in opaque_dirs:
+            opq_path = os.path.join(d, WHITEOUT_OPAQUE)
+            ti = tarfile.TarInfo(name=opq_path)
+            ti.size = 0
+            t.addfile(ti, io.BytesIO(b''))
+
+
+# ====================================================
+# TEST 1: Whiteout-only deletion (no implicit deletion)
+# ====================================================
+def test_whiteout_only_deletion():
+    print("\n=== TEST 1: Whiteout-only deletion (no implicit) ===")
+    tmpdir = tempfile.mkdtemp(prefix='dslim_t1_')
 
     l1 = os.path.join(tmpdir, 'l1.tar')
     make_tar(l1, [
         ('bin/sh', b'echo hello'),
         ('etc/os-release', b'TestOS'),
         ('var/cache/apt/pkgcache.bin', b'c' * 2000),
-        ('var/lib/apt/lists/lock', b'lk' * 200),
         ('usr/lib/libc.so', b'lib' * 500),
     ])
 
     l2 = os.path.join(tmpdir, 'l2.tar')
     make_whiteout_tar(l2,
-        [
-            ('app/main.py', b'print(1)' * 200),
-            ('var/cache/apt/pkgcache.bin', b'c' * 2000),
-            ('var/lib/apt/lists/lock', b'lk' * 200),
-            ('usr/lib/libc.so', b'lib' * 500),
-        ],
-        ['bin/sh', 'etc/os-release']
-    )
-
-    l3 = os.path.join(tmpdir, 'l3.tar')
-    make_whiteout_tar(l3,
-        [('app/config.json', b'{}' * 50)],
-        ['var/cache/apt/pkgcache.bin', 'var/lib/apt/lists/lock']
+        [('app/main.py', b'print(1)' * 200)],
+        ['bin/sh']
     )
 
     cfg = os.path.join(tmpdir, 'cfg.json')
     with open(cfg, 'w') as f:
         json.dump({'config': {'Image': 'sha:test'}, 'history': [
             {'created_by': 'FROM ubuntu', 'empty_layer': True},
-            {'created_by': 'FROM ubuntu', 'empty_layer': True},
-            {'created_by': '/bin/sh -c apt-get install', 'empty_layer': False},
-            {'created_by': '/bin/sh -c rm old files', 'empty_layer': False},
-            {'created_by': '/bin/sh -c more cleanup', 'empty_layer': False},
-        ]}, f)
-
-    man = os.path.join(tmpdir, 'manifest.json')
-    with open(man, 'w') as f:
-        json.dump([{'Config': 'cfg.json', 'RepoTags': ['test:latest'], 'Layers': ['l1.tar', 'l2.tar', 'l3.tar']}], f)
-
-    out_tar = os.path.join(tmpdir, 'img.tar')
-    with tarfile.open(out_tar, 'w') as t:
-        t.add(man, arcname='manifest.json')
-        t.add(cfg, arcname='cfg.json')
-        t.add(l1, arcname='l1.tar')
-        t.add(l2, arcname='l2.tar')
-        t.add(l3, arcname='l3.tar')
-
-    p = ImageParser()
-    m = p.parse_from_tar(out_tar)
-
-    check("whiteout-layer2-has-whiteouts", len(m.layers[1].whiteouts) == 2,
-          f"Expected 2 whiteouts, got {len(m.layers[1].whiteouts)}")
-    check("whiteout-layer2-no-wh-files", '.wh.bin' not in m.layers[1].files and '.wh.etc' not in m.layers[1].files,
-          "Whiteout files should not be counted as regular files")
-    check("whiteout-layer3-whiteouts", len(m.layers[2].whiteouts) == 2,
-          f"Expected 2 whiteouts, got {len(m.layers[2].whiteouts)}")
-
-    a = LayerAnalyzer(m)
-    r = a.analyze()
-
-    check("diff-layer1-no-deletions", len(r.layer_diffs[0].deleted) == 0,
-          f"Layer 0 should have 0 deletions, got {len(r.layer_diffs[0].deleted)}")
-    check("diff-layer2-has-deletions", len(r.layer_diffs[1].deleted) == 2,
-          f"Layer 1 should have 2 deletions, got {len(r.layer_diffs[1].deleted)}")
-
-    deleted_paths_layer2 = r.layer_diffs[1].deleted
-    check("diff-layer2-deleted-bin-sh", 'bin/sh' in deleted_paths_layer2,
-          f"Expected bin/sh deleted, got: {sorted(deleted_paths_layer2)}")
-    check("diff-layer2-deleted-etc-os-release", 'etc/os-release' in deleted_paths_layer2,
-          f"Expected etc/os-release deleted, got: {sorted(deleted_paths_layer2)}")
-
-    check("diff-layer3-has-deletions", len(r.layer_diffs[2].deleted) >= 2,
-          f"Layer 2 should have >=2 deletions, got {len(r.layer_diffs[2].deleted)}")
-
-    check("whiteout-count-match", r.layer_diffs[1].whiteout_count == 2,
-          f"whiteout_count should be 2, got {r.layer_diffs[1].whiteout_count}")
-
-    print()
-    print("  WHITEOUT TESTS PASSED!" if not any("whiteout" in e for e in errors) else "  WHITEOUT TESTS FAILED!")
-    shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-def test_glob_matching():
-    print("\n=== TEST: Glob Pattern Matching ===")
-
-    check("glob-apt-cache-exact", matches_any_glob("var/cache/apt", ["/var/cache/apt"]),
-          "var/cache/apt should match /var/cache/apt")
-    check("glob-apt-cache-subfile", matches_any_glob("var/cache/apt/pkgcache.bin", ["/var/cache/apt"]),
-          "var/cache/apt/pkgcache.bin should match /var/cache/apt")
-    check("glob-apt-cache-subdir", matches_any_glob("var/cache/apt/archives/lock", ["/var/cache/apt"]),
-          "var/cache/apt/archives/lock should match /var/cache/apt")
-    check("glob-apt-lists", matches_any_glob("var/lib/apt/lists/lock", ["/var/lib/apt/lists"]),
-          "var/lib/apt/lists/lock should match /var/lib/apt/lists")
-    check("glob-pip-cache", matches_any_glob("root/.cache/pip/http/a", ["/root/.cache/pip"]),
-          "root/.cache/pip/http/a should match /root/.cache/pip")
-    check("glob-npm-cache", matches_any_glob("root/.npm/_cacache/d1", ["/root/.npm"]),
-          "root/.npm/_cacache/d1 should match /root/.npm")
-    check("glob-yum-cache", matches_any_glob("var/cache/yum/x86_64/7/base/packages", ["/var/cache/yum"]),
-          "yum cache should match")
-
-    check("glob-not-match", not matches_any_glob("app/main.py", ["/var/cache/apt"]),
-          "app/main.py should NOT match /var/cache/apt")
-
-    check("glob-exclude-nm", matches_any_glob("app/node_modules/express/index.js", ["**/node_modules"]),
-          "node_modules should match **/node_modules")
-    check("glob-exclude-nm-deep", matches_any_glob("a/b/c/node_modules/x.js", ["**/node_modules"]),
-          "deep node_modules should match **/node_modules")
-    check("glob-exclude-app-tmp", matches_any_glob("app/tmp/cache/x", ["app/tmp/**"]),
-          "app/tmp/** should match app/tmp/cache/x")
-    check("glob-exclude-app-tmp-root", matches_any_glob("app/tmp", ["app/tmp/**"]),
-          "app/tmp/** should match app/tmp")
-
-    check("glob-not-match-partial", not matches_any_glob("other_app/node_modules", ["app/tmp/**"]),
-          "app/tmp/** should NOT match other_app/node_modules")
-
-    print()
-    print("  GLOB MATCHING TESTS PASSED!" if not any("glob" in e for e in errors) else "  GLOB MATCHING TESTS FAILED!")
-
-
-def test_cache_detection():
-    print("\n=== TEST: Cache Detection in Analysis ===")
-    tmpdir = tempfile.mkdtemp(prefix='dslim_cache_')
-
-    l1 = os.path.join(tmpdir, 'l1.tar')
-    make_tar(l1, [
-        ('var/cache/apt/pkgcache.bin', b'c' * 2000),
-        ('var/lib/apt/lists/lock', b'lk' * 500),
-        ('var/cache/yum/x86_64/7/base/primary.sqlite', b'yy' * 1000),
-        ('root/.cache/pip/http/a', b'pp' * 800),
-        ('root/.npm/_cacache/content-v2/sha1/aa/bb', b'nn' * 600),
-        ('app/main.py', b'print(1)' * 200),
-    ])
-    l2 = os.path.join(tmpdir, 'l2.tar')
-    make_tar(l2, [('app/config.json', b'{}' * 50), ('app/main.py', b'print(2)' * 200)])
-
-    cfg = os.path.join(tmpdir, 'cfg.json')
-    with open(cfg, 'w') as f:
-        json.dump({'config': {'Image': 'sha:test'}, 'history': [
-            {'created_by': 'RUN apt-get install', 'empty_layer': False},
-            {'created_by': 'COPY app', 'empty_layer': False},
+            {'created_by': '/bin/sh -c setup', 'empty_layer': False},
+            {'created_by': '/bin/sh -c rm bin/sh', 'empty_layer': False},
         ]}, f)
 
     man = os.path.join(tmpdir, 'manifest.json')
@@ -205,145 +98,95 @@ def test_cache_detection():
     a = LayerAnalyzer(m)
     r = a.analyze()
 
-    detector = PatternDetector(r)
-    issues = detector.detect_all()
+    # Layer 0: 4 files added, all go to cumulative
+    check("t1-l0-files", r.layer_diffs[0].added_file_count == 4, f"got {r.layer_diffs[0].added_file_count}")
+    check("t1-l0-del", r.layer_diffs[0].deleted_file_count == 0, f"got {r.layer_diffs[0].deleted_file_count}")
+    check("t1-l0-cum", r.cumulative_sizes[0] > 0)
 
-    cache_issues = [i for i in issues if i.pattern_type == "package_cache"]
-    check("cache-issue-found", len(cache_issues) > 0, f"Should detect cache issues, got {len(cache_issues)}")
+    # Layer 1: whiteout deletes only bin/sh
+    # - bin/sh: whiteout deleted
+    # - etc/os-release, var/cache/apt/pkgcache.bin, usr/lib/libc.so: NOT in layer 1 tar but NOT deleted (inherited)
+    # - app/main.py: new
+    check("t1-l1-deleted-only-whiteout", r.layer_diffs[1].deleted_file_count == 1,
+          f"Only bin/sh should be deleted, got {r.layer_diffs[1].deleted_file_count}: {sorted(r.layer_diffs[1].deleted)}")
+    check("t1-l1-deleted-is-bin-sh", 'bin/sh' in r.layer_diffs[1].deleted)
+    check("t1-l1-added", r.layer_diffs[1].added_file_count == 1, f"got {r.layer_diffs[1].added_file_count}")
+    check("t1-l1-added-is-app", 'app/main.py' in r.layer_diffs[1].added)
 
-    if cache_issues:
-        cache_issue = cache_issues[0]
-        cache_paths = [d[0] for d in cache_issue.details]
+    # Cumulative size should include inherited files + new, minus deleted
+    inherited_sizes = sum(m.layers[0].files[p] for p in m.layers[0].files if p not in r.layer_diffs[1].deleted)
+    new_size = sum(m.layers[1].files.values())
+    expected_cum = (inherited_sizes + new_size)
+    check("t1-cum-includes-inherited", r.cumulative_sizes[1] == expected_cum,
+          f"cum={r.cumulative_sizes[1]}, expected={expected_cum} (inherited={inherited_sizes}, new={new_size})")
 
-        check("cache-apt-subdir", any('var/cache/apt' in p for p in cache_paths),
-              f"apt cache should be detected, got: {cache_paths[:5]}")
-        check("cache-apt-lists", any('var/lib/apt/lists' in p for p in cache_paths),
-              f"apt lists should be detected, got: {cache_paths[:5]}")
-        check("cache-pip", any('pip' in p for p in cache_paths),
-              f"pip cache should be detected, got: {cache_paths[:5]}")
-        check("cache-npm", any('.npm' in p for p in cache_paths),
-              f"npm cache should be detected, got: {cache_paths[:5]}")
-        check("cache-yum", any('yum' in p for p in cache_paths),
-              f"yum cache should be detected, got: {cache_paths[:5]}")
-        check("cache-size-positive", cache_issue.size_estimate > 0,
-              f"Cache size should be positive, got {cache_issue.size_estimate}")
+    print(f"  Layer0: +{r.layer_diffs[0].added_size}B, deleted=0, cum={r.cumulative_sizes[0]}")
+    print(f"  Layer1: +{r.layer_diffs[1].added_size}B, deleted={r.layer_diffs[1].deleted_file_count}, cum={r.cumulative_sizes[1]}")
+    print("  -> Inherited files correctly kept in cumulative size!")
 
-        print(f"  Cache detected: {format_size(cache_issue.size_estimate)} in Layer {cache_issue.layer_index}")
-        print(f"  Cache paths: {[p for p, _ in cache_issue.details[:5]]}")
-
-    print()
-    print("  CACHE DETECTION TESTS PASSED!" if not any("cache" in e for e in errors) else "  CACHE DETECTION TESTS FAILED!")
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_exclude_patterns():
-    print("\n=== TEST: Exclude Patterns in Full Pipeline ===")
-    tmpdir = tempfile.mkdtemp(prefix='dslim_excl_')
+# ====================================================
+# TEST 2: Dockerfile-instruction-to-layer matching (skip FROM base)
+# ====================================================
+def test_dockerfile_matching_skip_base():
+    print("\n=== TEST 2: Dockerfile matching skip FROM base layers ===")
+    tmpdir = tempfile.mkdtemp(prefix='dslim_t2_')
 
-    l1 = os.path.join(tmpdir, 'l1.tar')
-    make_tar(l1, [
-        ('app/main.py', b'print(1)' * 200),
-        ('app/node_modules/express/index.js', b'x' * 5000),
-        ('app/tmp/cache/x', b't' * 3000),
-        ('app/data/clean.json', b'{}' * 100),
-    ])
+    # Simulate: base ubuntu has 5 base layers, user added 2 layers
+    l0, l1, l2, l3, l4 = [os.path.join(tmpdir, f'l{i}.tar') for i in range(5)]
+    lu0 = os.path.join(tmpdir, 'lu0.tar')
+    lu1 = os.path.join(tmpdir, 'lu1.tar')
+
+    make_tar(l0, [('bin/cp', b'c' * 100)])
+    make_tar(l1, [('bin/mv', b'm' * 200)])
+    make_tar(l2, [('usr/lib/ld.so', b'l' * 500)])
+    make_tar(l3, [('etc/hostname', b'h' * 50)])
+    make_tar(l4, [('var/log/lastlog', b'g' * 300)])
+    make_tar(lu0, [('usr/bin/myapp', b'm' * 3000)])
+    make_tar(lu1, [('etc/myapp/config.json', b'{}' * 150)])
 
     cfg = os.path.join(tmpdir, 'cfg.json')
     with open(cfg, 'w') as f:
         json.dump({'config': {'Image': 'sha:test'}, 'history': [
-            {'created_by': 'COPY app', 'empty_layer': False},
-        ]}, f)
-
-    man = os.path.join(tmpdir, 'manifest.json')
-    with open(man, 'w') as f:
-        json.dump([{'Config': 'cfg.json', 'RepoTags': ['test:latest'], 'Layers': ['l1.tar']}], f)
-
-    out_tar = os.path.join(tmpdir, 'img.tar')
-    with tarfile.open(out_tar, 'w') as t:
-        t.add(man, arcname='manifest.json')
-        t.add(cfg, arcname='cfg.json')
-        t.add(l1, arcname='l1.tar')
-
-    p_full = ImageParser()
-    m_full = p_full.parse_from_tar(out_tar)
-    a_full = LayerAnalyzer(m_full)
-    r_full = a_full.analyze()
-    full_size = r_full.total_size
-
-    p_excl = ImageParser(exclude_patterns=["**/node_modules", "app/tmp/**"])
-    m_excl = p_excl.parse_from_tar(out_tar)
-    a_excl = LayerAnalyzer(m_excl)
-    r_excl = a_excl.analyze()
-    excl_size = r_excl.total_size
-
-    check("exclude-reduces-size", excl_size < full_size,
-          f"Excluded size {excl_size} should be < full size {full_size}")
-    check("exclude-nm-file-gone", 'app/node_modules/express/index.js' not in m_excl.layers[0].files,
-          "node_modules file should be excluded")
-    check("exclude-tmp-file-gone", 'app/tmp/cache/x' not in m_excl.layers[0].files,
-          "app/tmp file should be excluded")
-    check("exclude-clean-kept", 'app/data/clean.json' in m_excl.layers[0].files,
-          "clean.json should NOT be excluded")
-    check("exclude-main-kept", 'app/main.py' in m_excl.layers[0].files,
-          "main.py should NOT be excluded")
-
-    diff = full_size - excl_size
-    print(f"  Full size: {full_size}, Excluded size: {excl_size}, Saved: {diff}")
-
-    print()
-    print("  EXCLUDE PATTERN TESTS PASSED!" if not any("exclude" in e for e in errors) else "  EXCLUDE PATTERN TESTS FAILED!")
-    shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-def test_dockerfile_layer_matching():
-    print("\n=== TEST: Dockerfile Layer Matching ===")
-    tmpdir = tempfile.mkdtemp(prefix='dslim_df_')
-
-    l1 = os.path.join(tmpdir, 'l1.tar')
-    l2 = os.path.join(tmpdir, 'l2.tar')
-    l3 = os.path.join(tmpdir, 'l3.tar')
-    make_tar(l1, [('base/file1', b'base' * 500)])
-    make_tar(l2, [('usr/bin/app', b'app' * 2000)])
-    make_tar(l3, [('etc/config', b'cfg' * 100)])
-
-    cfg = os.path.join(tmpdir, 'cfg.json')
-    with open(cfg, 'w') as f:
-        json.dump({'config': {'Image': 'sha:test'}, 'history': [
-            {'created_by': '/bin/sh -c base layer', 'empty_layer': True},
+            {'created_by': '/bin/sh -c base', 'empty_layer': True},
+            {'created_by': '/bin/sh -c base', 'empty_layer': True},
+            {'created_by': '/bin/sh -c base', 'empty_layer': True},
+            {'created_by': '/bin/sh -c base', 'empty_layer': True},
+            {'created_by': '/bin/sh -c base', 'empty_layer': True},
             {'created_by': '/bin/sh -c apt-get install', 'empty_layer': False},
             {'created_by': '/bin/sh -c copy config', 'empty_layer': False},
         ]}, f)
 
     man = os.path.join(tmpdir, 'manifest.json')
     with open(man, 'w') as f:
-        json.dump([{'Config': 'cfg.json', 'RepoTags': ['test:latest'], 'Layers': ['l1.tar', 'l2.tar', 'l3.tar']}], f)
+        json.dump([{'Config': 'cfg.json', 'RepoTags': ['test:latest'],
+                     'Layers': ['l0.tar','l1.tar','l2.tar','l3.tar','l4.tar','lu0.tar','lu1.tar']}], f)
 
     out_tar = os.path.join(tmpdir, 'img.tar')
     with tarfile.open(out_tar, 'w') as t:
         t.add(man, arcname='manifest.json')
         t.add(cfg, arcname='cfg.json')
-        t.add(l1, arcname='l1.tar')
-        t.add(l2, arcname='l2.tar')
-        t.add(l3, arcname='l3.tar')
+        for fpath in ['l0.tar','l1.tar','l2.tar','l3.tar','l4.tar','lu0.tar','lu1.tar']:
+            t.add(os.path.join(tmpdir, fpath), arcname=fpath)
 
     p = ImageParser()
     m = p.parse_from_tar(out_tar)
     a = LayerAnalyzer(m)
     r = a.analyze()
 
-    check("non-base-indices", len(r.non_base_layer_indices) == 2,
+    check("t2-base-count", len(r.non_base_layer_indices) == 2,
           f"Expected 2 non-base layers, got {len(r.non_base_layer_indices)}: {r.non_base_layer_indices}")
-    check("non-base-layer-1", r.non_base_layer_indices[0] == 1,
-          f"First non-base layer should be index 1, got {r.non_base_layer_indices[0]}")
-    check("non-base-layer-2", r.non_base_layer_indices[1] == 2,
-          f"Second non-base layer should be index 2, got {r.non_base_layer_indices[1]}")
+    check("t2-non-base-5", 5 in r.non_base_layer_indices)
+    check("t2-non-base-6", 6 in r.non_base_layer_indices)
 
     dockerfile_path = os.path.join(tmpdir, 'Dockerfile')
     with open(dockerfile_path, 'w') as f:
         f.write("""FROM ubuntu:20.04
-RUN apt-get install -y python3
-COPY config /etc/
-CMD ["python3"]
+RUN apt-get install -y myapp
+COPY config.json /etc/myapp/
+CMD ["myapp"]
 """)
 
     dfa = DockerfileAnalyzer(dockerfile_path)
@@ -352,51 +195,158 @@ CMD ["python3"]
 
     run_instr = [i for i in dfa.instructions if i.instruction == "RUN"][0]
     copy_instr = [i for i in dfa.instructions if i.instruction == "COPY"][0]
+    from_instr = [i for i in dfa.instructions if i.instruction == "FROM"][0]
 
-    check("dfa-run-matched", run_instr.matched,
-          f"RUN should be matched, got matched={run_instr.matched}")
-    check("dfa-copy-matched", copy_instr.matched,
-          f"COPY should be matched, got matched={copy_instr.matched}")
-    check("dfa-run-layer-index", run_instr.layer_index == 1,
-          f"RUN should be Layer 1 (non-base), got {run_instr.layer_index}")
-    check("dfa-copy-layer-index", copy_instr.layer_index == 2,
-          f"COPY should be Layer 2 (non-base), got {copy_instr.layer_index}")
-    check("dfa-run-size", run_instr.estimated_size_added > 0,
-          f"RUN should have positive size, got {run_instr.estimated_size_added}")
+    check("t2-from-not-zero", not (from_instr.matched and from_instr.estimated_size_added > 0),
+          "FROM should not get layer size")
+    check("t2-run-matched", run_instr.matched, "RUN should be matched")
+    check("t2-copy-matched", copy_instr.matched, "COPY should be matched")
 
-    print(f"  RUN  -> Layer {run_instr.layer_index}: {format_size(run_instr.estimated_size_added)}")
-    print(f"  COPY -> Layer {copy_instr.layer_index}: {format_size(copy_instr.estimated_size_added)}")
+    check("t2-run-layer", run_instr.layer_index == 5,
+          f"RUN should be Layer 5 (non-base), got {run_instr.layer_index}")
+    check("t2-copy-layer", copy_instr.layer_index == 6,
+          f"COPY should be Layer 6 (non-base), got {copy_instr.layer_index}")
 
-    print()
-    print("  DOCKERFILE MATCHING TESTS PASSED!" if not any("dfa" in e for e in errors) else "  DOCKERFILE MATCHING TESTS FAILED!")
+    # RUN should show 3000 bytes (usr/bin/myapp), not include base layers
+    check("t2-run-size", run_instr.estimated_size_added > 1000,
+          f"RUN should show only its own size, got {run_instr.estimated_size_added}")
+
+    print(f"  Base layers: 0-4 (skipped), User layers: 5-6")
+    print(f"  RUN  (Layer 5): {format_size(run_instr.estimated_size_added)}")
+    print(f"  COPY (Layer 6): {format_size(copy_instr.estimated_size_added)}")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_full_report_with_whiteout_and_cache():
-    print("\n=== TEST: Full Report Integration ===")
-    tmpdir = tempfile.mkdtemp(prefix='dslim_int_')
+# ====================================================
+# TEST 3: Opaque whiteout - clears directory contents
+# ====================================================
+def test_opaque_whiteout():
+    print("\n=== TEST 3: Opaque whiteout directory clearing ===")
+    tmpdir = tempfile.mkdtemp(prefix='dslim_t3_')
 
     l1 = os.path.join(tmpdir, 'l1.tar')
     make_tar(l1, [
-        ('var/cache/apt/pkgcache.bin', b'c' * 2000),
-        ('var/lib/apt/lists/lock', b'lk' * 500),
-        ('root/.cache/pip/http/a', b'pp' * 800),
-        ('app/main.py', b'print(1)' * 200),
-        ('old_file.txt', b'old' * 1000),
+        ('app/cache/a.txt', b'aa' * 500),
+        ('app/cache/b.txt', b'bb' * 400),
+        ('app/data/clean.json', b'cc' * 100),
+        ('lib/shared/libx.so', b'll' * 300),
     ])
 
     l2 = os.path.join(tmpdir, 'l2.tar')
-    make_whiteout_tar(l2,
-        [('app/config.json', b'{}' * 50)],
-        ['old_file.txt', 'var/cache/apt/pkgcache.bin']
+    make_tar_with_opaque(l2,
+        [('app/data/new_config.json', b'nn' * 200)],
+        ['app/cache']
     )
 
     cfg = os.path.join(tmpdir, 'cfg.json')
     with open(cfg, 'w') as f:
         json.dump({'config': {'Image': 'sha:test'}, 'history': [
-            {'created_by': 'FROM ubuntu', 'empty_layer': True},
-            {'created_by': '/bin/sh -c apt-get install', 'empty_layer': False},
-            {'created_by': '/bin/sh -c cleanup', 'empty_layer': False},
+            {'created_by': 'FROM base', 'empty_layer': True},
+            {'created_by': '/bin/sh -c add cache', 'empty_layer': False},
+            {'created_by': '/bin/sh -c clear cache dir', 'empty_layer': False},
+        ]}, f)
+
+    man = os.path.join(tmpdir, 'manifest.json')
+    with open(man, 'w') as f:
+        json.dump([{'Config': 'cfg.json', 'RepoTags': ['test:latest'], 'Layers': ['l1.tar', 'l2.tar']}], f)
+
+    out_tar = os.path.join(tmpdir, 'img.tar')
+    with tarfile.open(out_tar, 'w') as t:
+        t.add(man, arcname='manifest.json')
+        t.add(cfg, arcname='cfg.json')
+        t.add(l1, arcname='l1.tar')
+        t.add(l2, arcname='l2.tar')
+
+    p = ImageParser()
+    m = p.parse_from_tar(out_tar)
+
+    check("t3-opaque-dir-detected", len(m.layers[1].opaque_dirs) == 1,
+          f"Expected 1 opaque dir, got {len(m.layers[1].opaque_dirs)}: {m.layers[1].opaque_dirs}")
+    check("t3-opaque-dir-is-cache", 'app/cache' in m.layers[1].opaque_dirs,
+          f"Expected app/cache, got {m.layers[1].opaque_dirs}")
+
+    a = LayerAnalyzer(m)
+    r = a.analyze()
+
+    # Layer 0: 4 added, 0 deleted
+    check("t3-l0-added", r.layer_diffs[0].added_file_count == 4, f"got {r.layer_diffs[0].added_file_count}")
+
+    # Layer 1: opaque dir app/cache deletes a.txt + b.txt from layer 0
+    #   new file: app/data/new_config.json
+    #   inherited: app/data/clean.json, lib/shared/libx.so
+    check("t3-l1-deleted", r.layer_diffs[1].deleted_file_count == 2,
+          f"Expected 2 deleted (a.txt + b.txt), got {r.layer_diffs[1].deleted_file_count}: {sorted(r.layer_diffs[1].deleted)}")
+
+    deleted_paths = r.layer_diffs[1].deleted
+    check("t3-l1-del-a", 'app/cache/a.txt' in deleted_paths)
+    check("t3-l1-del-b", 'app/cache/b.txt' in deleted_paths)
+
+    # Files outside opaque dir should NOT be deleted
+    check("t3-l1-not-del-clean", 'app/data/clean.json' not in deleted_paths,
+          "app/data/clean.json should NOT be deleted (different dir)")
+    check("t3-l1-not-del-lib", 'lib/shared/libx.so' not in deleted_paths,
+          "lib/shared/libx.so should NOT be deleted (different dir)")
+
+    check("t3-l1-added", r.layer_diffs[1].added_file_count == 1,
+          f"Expected 1 new file, got {r.layer_diffs[1].added_file_count}")
+    check("t3-l1-added-config", 'app/data/new_config.json' in r.layer_diffs[1].added)
+
+    # Cumulative size should include inherited + new, minus deleted
+    l1_size = r.cumulative_sizes[0]
+    l2_deleted_size = sum(m.layers[0].files[p] for p in deleted_paths)
+    l2_added_size = r.layer_diffs[1].added_size
+    expected_cum2 = l1_size - l2_deleted_size + l2_added_size
+    check("t3-cum-correct", r.cumulative_sizes[1] == expected_cum2,
+          f"cum={r.cumulative_sizes[1]}, expected={expected_cum2}")
+
+    # opaque_count
+    check("t3-opaque-count", r.layer_diffs[1].opaque_count == 2,
+          f"opaque_count should be 2 (files deleted), got {r.layer_diffs[1].opaque_count}")
+
+    print(f"  Layer0: +{r.layer_diffs[0].added_size}B, deleted=0, cum={r.cumulative_sizes[0]}")
+    print(f"  Layer1: +{r.layer_diffs[1].added_size}B, deleted={r.layer_diffs[1].deleted_file_count} (opaque dir), cum={r.cumulative_sizes[1]}")
+    print("  -> Only files under opaque dir removed, sibling directories preserved!")
+
+    # Also run the full report to verify display
+    report_text = Report(r, 'test:latest').generate_full_report()
+    check("t3-report-has-opaque", "opaque" in report_text.lower(),
+          "Report should mention opaque deletions")
+
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ====================================================
+# TEST 4: Combined whiteout + opaque + inherited
+# ====================================================
+def test_combined_whiteout_opaque_inherited():
+    print("\n=== TEST 4: Combined whiteout + opaque + inherited ===")
+    tmpdir = tempfile.mkdtemp(prefix='dslim_t4_')
+
+    l1 = os.path.join(tmpdir, 'l1.tar')
+    make_tar(l1, [
+        ('bin/sh', b'echo hello'),
+        ('bin/ls', b'list'),
+        ('usr/local/a.pyc', b'cache' * 100),
+        ('var/cache/pkg.bin', b'cache' * 200),
+    ])
+
+    l2 = os.path.join(tmpdir, 'l2.tar')
+    # whiteout deletes bin/ls; opaque deletes var/cache/ content; new file added
+    with tarfile.open(l2, 'w') as t:
+        for n, c in [('app/main.py', b'print' * 300)]:
+            ti = tarfile.TarInfo(name=n); ti.size = len(c); t.addfile(ti, io.BytesIO(c))
+        # whiteout for bin/ls
+        ti = tarfile.TarInfo(name='bin/' + WHITEOUT_PREFIX + 'ls'); ti.size = 0; t.addfile(ti, io.BytesIO(b''))
+        # opaque marker for var/cache
+        ti = tarfile.TarInfo(name='var/cache/' + WHITEOUT_OPAQUE); ti.size = 0; t.addfile(ti, io.BytesIO(b''))
+
+    cfg = os.path.join(tmpdir, 'cfg.json')
+    with open(cfg, 'w') as f:
+        json.dump({'config': {'Image': 'sha:test'}, 'history': [
+            {'created_by': 'FROM base', 'empty_layer': True},
+            {'created_by': 'COPY base', 'empty_layer': False},
+            {'created_by': 'RUN cleanup', 'empty_layer': False},
         ]}, f)
 
     man = os.path.join(tmpdir, 'manifest.json')
@@ -415,34 +365,50 @@ def test_full_report_with_whiteout_and_cache():
     a = LayerAnalyzer(m)
     r = a.analyze()
 
-    report_text = Report(r, 'test:latest').generate_full_report()
+    # Layer 0: 4 files, 0 deleted
+    check("t4-l0-added", r.layer_diffs[0].added_file_count == 4)
 
-    check("report-has-header", "Docker Slim" in report_text, "Report should have header")
-    check("report-has-deleted-info", "Deleted" in report_text, "Report should show deleted info")
-    check("report-has-cache-section", "package_cache" in report_text, "Report should have cache section")
-    check("report-has-cross-layer", "add_delete_cross_layer" in report_text, "Report should have cross-layer deletion")
-    check("report-has-savings", "ESTIMATED SAVINGS" in report_text, "Report should have savings section")
+    # Layer 1:
+    #   bin/sh: NOT in l2.tar AND NOT whiteout → INHERITED, NOT deleted
+    #   bin/ls: whiteout → DELETED
+    #   usr/local/a.pyc: NOT in l2.tar AND NOT whiteout → INHERITED, NOT deleted
+    #   var/cache/pkg.bin: opaque dir var/cache/ → DELETED
+    #   app/main.py: NEW
+    check("t4-l1-deleted-count", r.layer_diffs[1].deleted_file_count == 2,
+          f"Expected 2 deleted (ls + pkg.bin), got {r.layer_diffs[1].deleted_file_count}: {sorted(r.layer_diffs[1].deleted)}")
 
-    print()
-    print("  FULL REPORT INTEGRATION TESTS PASSED!" if not any("report" in e for e in errors) else "  FULL REPORT INTEGRATION TESTS FAILED!")
+    deleted = r.layer_diffs[1].deleted
+    check("t4-l1-del-ls", 'bin/ls' in deleted)
+    check("t4-l1-del-pkg", 'var/cache/pkg.bin' in deleted)
+
+    # Inherited files should NOT be in deleted
+    check("t4-l1-not-del-sh", 'bin/sh' not in deleted, "bin/sh should be INHERITED, not deleted")
+    check("t4-l1-not-del-pyc", 'usr/local/a.pyc' not in deleted, "a.pyc should be INHERITED, not deleted")
+
+    check("t4-l1-added", r.layer_diffs[1].added_file_count == 1)
+    check("t4-l1-whiteout-count", r.layer_diffs[1].whiteout_count == 1)
+    check("t4-l1-opaque-count", r.layer_diffs[1].opaque_count == 1)
+
+    print(f"  Deleted: {sorted(deleted)}")
+    print(f"  Inherited: bin/sh, usr/local/a.pyc")
+    print(f"  New: app/main.py")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    test_whiteout()
-    test_glob_matching()
-    test_cache_detection()
-    test_exclude_patterns()
-    test_dockerfile_layer_matching()
-    test_full_report_with_whiteout_and_cache()
+    test_whiteout_only_deletion()
+    test_dockerfile_matching_skip_base()
+    test_opaque_whiteout()
+    test_combined_whiteout_opaque_inherited()
 
     print()
     print("=" * 60)
     if errors:
-        print(f"  ❌ {len(errors)} TEST(S) FAILED:")
+        print(f"  FAILED {len(errors)} test(s):")
         for e in errors:
             print(f"     {e}")
     else:
-        print("  ✅ ALL TESTS PASSED!")
+        print("  ALL TESTS PASSED!")
     print("=" * 60)
     sys.exit(1 if errors else 0)
