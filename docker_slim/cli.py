@@ -4,7 +4,7 @@ import os
 from docker_slim import __version__
 from docker_slim.image_parser import ImageParser
 from docker_slim.layer_analyzer import LayerAnalyzer
-from docker_slim.tree_visualizer import TreeVisualizer
+from docker_slim.tree_visualizer import TreeVisualizer, SORT_ADDED
 from docker_slim.pattern_detector import PatternDetector
 from docker_slim.optimizer import Optimizer
 from docker_slim.report import Report
@@ -35,24 +35,41 @@ def cmd_analyze(args):
     analyzer = LayerAnalyzer(manifest)
     analysis = analyzer.analyze()
 
+    dfa = None
+    if args.dockerfile:
+        dfa = DockerfileAnalyzer(args.dockerfile)
+        dfa.parse()
+        dfa.estimate_impact(dfa.instructions, analysis.layer_diffs, analysis.non_base_layer_indices)
+
+    sort_by_val = getattr(args, "sort_by", None) or SORT_ADDED
+    sort_labels = {"added": SORT_ADDED, "cumulative": "cumulative", "deleted": "deleted"}
+    sort_by = sort_labels.get(sort_by_val, SORT_ADDED)
+
     if args.report:
-        report = Report(analysis, args.image)
+        report = Report(analysis, args.image, sort_by=sort_by, dfa=dfa)
         full_report = report.generate_full_report()
         print(full_report)
         if args.output:
             with open(args.output, "w", encoding="utf-8") as f:
                 f.write(full_report)
             print(f"  Report saved to: {args.output}")
+
+        if args.json is not None:
+            json_output = report.generate_json_report()
+            if args.json == "__AUTO__":
+                json_path = f"{args.image.replace(':', '_').replace('/', '_')}_analysis.json"
+            else:
+                json_path = args.json
+            with open(json_path, "w", encoding="utf-8") as f:
+                f.write(json_output)
+            print(f"  JSON report saved to: {json_path}")
     else:
-        visualizer = TreeVisualizer(analysis)
+        visualizer = TreeVisualizer(analysis, sort_by=sort_by)
         print(visualizer.render())
         print(visualizer.render_summary_table())
 
-    if args.dockerfile:
-        dfa = DockerfileAnalyzer(args.dockerfile)
-        dfa.parse()
-        dfa.estimate_impact(dfa.instructions, analysis.layer_diffs, analysis.non_base_layer_indices)
-        print(dfa.generate_report())
+        if dfa:
+            print(dfa.generate_report())
 
 
 def cmd_optimize(args):
@@ -257,6 +274,10 @@ Examples:
     p_analyze.add_argument("--exclude-node-modules", "--no-node-modules", action="store_true",
                            help="Exclude node_modules directories")
     p_analyze.add_argument("--dockerfile", "-f", help="Analyze Dockerfile alongside image")
+    p_analyze.add_argument("--sort-by", choices=["added", "cumulative", "deleted"], default="added",
+                           help="Sort tree view by added size / cumulative size / deleted reclaim (default: added)")
+    p_analyze.add_argument("--json", nargs="?", const="__AUTO__", default=None,
+                           help="Export JSON report (optional: specify output path)")
     p_analyze.set_defaults(func=cmd_analyze)
 
     p_optimize = subparsers.add_parser("optimize", help="Generate optimized Dockerfile")
