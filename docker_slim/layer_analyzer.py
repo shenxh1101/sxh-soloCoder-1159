@@ -13,6 +13,7 @@ class LayerAnalysis:
         self.total_size = 0
         self.cumulative_sizes = []
         self.deleted_file_history = []
+        self.non_base_layer_indices = []
 
 
 class LayerAnalyzer:
@@ -22,6 +23,14 @@ class LayerAnalyzer:
     def analyze(self) -> LayerAnalysis:
         result = LayerAnalysis()
         result.layers = self.manifest.layers
+
+        history = self.manifest.config.get("history", [])
+        for i, entry in enumerate(history):
+            if i >= len(self.manifest.layers):
+                break
+            empty = entry.get("empty_layer", False)
+            if not empty:
+                result.non_base_layer_indices.append(i)
 
         cumulative_state = {}
         all_deleted = []
@@ -53,7 +62,8 @@ class LayerAnalyzer:
         current_file_paths = set(layer.files.keys())
         previous_paths = set(previous_state.keys())
 
-        diff.deleted = previous_paths - current_file_paths
+        missing_deleted = previous_paths - current_file_paths
+        diff.deleted = layer.whiteouts & previous_paths | missing_deleted
 
         for path, size in layer.files.items():
             if path not in previous_state:
@@ -64,6 +74,8 @@ class LayerAnalyzer:
                 diff.unchanged[path] = size
 
         diff.added_dir_count = len(layer.dirs - set(previous_state.keys()))
+        diff.whiteout_count = len(layer.whiteouts & previous_paths)
+        diff.opaque_count = len(layer.opaque_dirs)
 
         return diff
 
@@ -78,6 +90,8 @@ class LayerDiff:
         self.unchanged = {}
         self.deleted = set()
         self.added_dir_count = 0
+        self.whiteout_count = 0
+        self.opaque_count = 0
 
     @property
     def added_size(self) -> int:

@@ -51,7 +51,7 @@ def cmd_analyze(args):
     if args.dockerfile:
         dfa = DockerfileAnalyzer(args.dockerfile)
         dfa.parse()
-        dfa.estimate_impact(dfa.instructions, analysis.layer_diffs)
+        dfa.estimate_impact(dfa.instructions, analysis.layer_diffs, analysis.non_base_layer_indices)
         print(dfa.generate_report())
 
 
@@ -202,7 +202,7 @@ def cmd_dockerfile(args):
             manifest = parser.parse_from_docker(args.image)
             analyzer = LayerAnalyzer(manifest)
             analysis = analyzer.analyze()
-            dfa.estimate_impact(dfa.instructions, analysis.layer_diffs)
+            dfa.estimate_impact(dfa.instructions, analysis.layer_diffs, analysis.non_base_layer_indices)
             print(dfa.generate_report())
         except Exception as e:
             print(f"  Warning: Could not analyze image: {e}")

@@ -1,12 +1,16 @@
 import fnmatch
 import json
 import os
+import re
 import subprocess
 import tarfile
 import tempfile
 import shutil
 from typing import Optional
 from docker_slim.utils import normalize_path, is_dir, is_file, is_symlink, matches_any_glob
+
+WHITEOUT_PREFIX = ".wh."
+WHITEOUT_OPAQUE = ".wh..wh..opq"
 
 
 class LayerInfo:
@@ -17,11 +21,28 @@ class LayerInfo:
         self.files = {}
         self.dirs = set()
         self.symlinks = {}
+        self.whiteouts = set()
+        self.opaque_dirs = set()
         self.created_by = ""
         self.comment = ""
 
     def add_entry(self, path: str, tar_info, size_bytes: int = 0):
         norm = normalize_path(path)
+        basename = os.path.basename(norm)
+
+        if basename == WHITEOUT_OPAQUE:
+            parent = os.path.dirname(norm)
+            self.opaque_dirs.add(parent if parent else "")
+            return
+
+        if basename.startswith(WHITEOUT_PREFIX):
+            original_name = basename[len(WHITEOUT_PREFIX):]
+            parent_dir = os.path.dirname(norm)
+            deleted_path = os.path.join(parent_dir, original_name) if parent_dir else original_name
+            deleted_norm = normalize_path(deleted_path)
+            self.whiteouts.add(deleted_norm)
+            return
+
         if is_dir(tar_info):
             self.dirs.add(norm)
         elif is_symlink(tar_info):
@@ -42,7 +63,7 @@ class LayerInfo:
         return sum(self.files.values())
 
     def __repr__(self):
-        return f"LayerInfo(id={self.layer_id[:12]}, idx={self.index}, size={self.total_size}, files={self.file_count})"
+        return f"LayerInfo(id={self.layer_id[:12]}, idx={self.index}, size={self.total_size}, files={self.file_count}, whiteouts={len(self.whiteouts)})"
 
 
 class ImageManifest:

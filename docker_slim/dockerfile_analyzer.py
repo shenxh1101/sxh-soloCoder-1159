@@ -75,30 +75,51 @@ class DockerfileAnalyzer:
 
         return self.instructions
 
-    def estimate_impact(self, instructions: List[InstructionImpact], layer_info_list: list) -> List[InstructionImpact]:
+    def estimate_impact(self, instructions: List[InstructionImpact], layer_info_list: list, non_base_indices: list = None) -> List[InstructionImpact]:
         if not layer_info_list:
             return self.instructions
 
         impactful_instructions = ["RUN", "COPY", "ADD"]
-        layer_idx = 0
-        n_layers = len(layer_info_list)
+        impactful_from_instructions = [i for i in self.instructions if i.instruction in impactful_instructions]
 
-        for instr in self.instructions:
-            if instr.instruction in impactful_instructions:
-                if layer_idx < n_layers:
-                    diff = layer_info_list[layer_idx]
-                    instr.estimated_size_added = diff.added_size
-                    instr.layer_index = diff.layer_index
+        if non_base_indices is not None and len(non_base_indices) >= len(impactful_from_instructions):
+            use_layers = [layer_info_list[i] for i in non_base_indices]
+            layer_idx = 0
+            for instr in self.instructions:
+                if instr.instruction in impactful_instructions:
+                    if layer_idx < len(use_layers):
+                        diff = use_layers[layer_idx]
+                        instr.estimated_size_added = diff.added_size
+                        instr.layer_index = diff.layer_index
+                        instr.matched = True
+                        layer_idx += 1
+                    else:
+                        instr.estimated_size_added = 0
+                        instr.layer_index = -1
+                        instr.matched = False
+                elif instr.instruction == "FROM":
                     instr.matched = True
-                    layer_idx += 1
                 else:
                     instr.estimated_size_added = 0
-                    instr.layer_index = -1
-                    instr.matched = False
-            elif instr.instruction == "FROM":
-                instr.matched = True
-            else:
-                instr.estimated_size_added = 0
+        else:
+            impactful_idx = 0
+            n_layers = len(layer_info_list)
+            for instr in self.instructions:
+                if instr.instruction in impactful_instructions:
+                    if impactful_idx < n_layers:
+                        diff = layer_info_list[impactful_idx]
+                        instr.estimated_size_added = diff.added_size
+                        instr.layer_index = diff.layer_index
+                        instr.matched = True
+                        impactful_idx += 1
+                    else:
+                        instr.estimated_size_added = 0
+                        instr.layer_index = -1
+                        instr.matched = False
+                elif instr.instruction == "FROM":
+                    instr.matched = True
+                else:
+                    instr.estimated_size_added = 0
         return self.instructions
 
     def generate_report(self) -> str:

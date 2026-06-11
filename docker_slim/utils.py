@@ -32,13 +32,25 @@ def normalize_path(path: str) -> str:
 
 def matches_any_glob(norm_path: str, patterns: list) -> bool:
     for pattern in patterns:
-        if fnmatch.fnmatch(norm_path, pattern):
+        p = pattern.rstrip("/").lstrip("/")
+        if fnmatch.fnmatch(norm_path, p):
             return True
-        pattern_no_trailing = pattern.rstrip("/")
-        if norm_path == pattern_no_trailing:
+        if fnmatch.fnmatch(norm_path, p + "/*"):
             return True
-        if norm_path.startswith(pattern_no_trailing + "/"):
+        if fnmatch.fnmatch("*/" + norm_path, p + "/*"):
             return True
+        if fnmatch.fnmatch(norm_path, "*/" + p + "/*"):
+            return True
+        if norm_path == p:
+            return True
+        if norm_path.startswith(p + "/"):
+            return True
+        if "/" + norm_path == p:
+            return True
+        if p.endswith("/**"):
+            base = p[:-3]
+            if norm_path == base:
+                return True
     return False
 
 
