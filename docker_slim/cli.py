@@ -51,8 +51,7 @@ def cmd_analyze(args):
     if args.dockerfile:
         dfa = DockerfileAnalyzer(args.dockerfile)
         dfa.parse()
-        layer_sizes = {i: d.added_size for i, d in enumerate(analysis.layer_diffs)}
-        dfa.estimate_impact(None, layer_sizes)
+        dfa.estimate_impact(dfa.instructions, analysis.layer_diffs)
         print(dfa.generate_report())
 
 
@@ -87,30 +86,66 @@ def cmd_optimize(args):
     print()
 
     output_path = args.output or "Dockerfile.slim"
-    dockerfile = optimizer.generate_optimized_dockerfile(args.image)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(dockerfile)
-    print(f"  Optimized Dockerfile saved to: {output_path}")
+    output_tag = args.output_tag or ""
 
-    if args.build_script:
-        script_path = args.build_script
-        lines = []
-        lines.append("#!/bin/bash")
-        lines.append(f"# Build slimmed image from {args.image}")
-        lines.append(f"")
-        lines.append(f"docker build -f {output_path} -t {args.image}-slim .")
-        lines.append(f"echo 'Built: {args.image}-slim'")
-        lines.append(f"docker images {args.image}-slim")
+    if args.full_export:
+        if args.tar:
+            print("  ERROR: Full export/cleanup/rebuild is only supported when using a local Docker image, not a tar file.")
+            print("  Hint: You can import it into Docker first with docker load -i image.tar, then run optimize again.")
+            sys.exit(1)
+
+        if args.dry_run:
+            print("  [Dry run] Previewing full export/cleanup/rebuild pipeline:")
+            print("")
+            script = optimizer.generate_export_slim_script(args.image, output_path, output_tag)
+            print(script)
+            print()
+            print("  [Dry run done]")
+            return
+
+        script_content = optimizer.generate_export_slim_script(args.image, output_path, output_tag)
+        script_path = "docker-slim-export.sh"
         with open(script_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-        print(f"  Build script saved to: {script_path}")
+            f.write(script_content)
+        os.chmod(script_path, 0o755)
+        print(f"  Full export/cleanup/rebuild script generated: {script_path}")
+        print(f"  Dockerfile: {output_path}")
+        print()
+        print("  To run the automated slimming:")
+        print(f"    ./docker-slim-export.sh")
+        return
+
+    dockerfile = optimizer.generate_optimized_dockerfile(args.image)
+
+    if not args.dry_run:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(dockerfile)
+        print(f"  Optimized Dockerfile saved to: {output_path}")
+
+        if args.build_script:
+            script_path = args.build_script
+            lines = []
+            lines.append("#!/bin/bash")
+            lines.append(f"# Build slimmed image from {args.image}")
+            lines.append(f"")
+            lines.append(f"docker build -f {output_path} -t {args.image}-slim .")
+            lines.append(f"echo 'Built: {args.image}-slim'")
+            lines.append(f"docker images {args.image}-slim")
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            os.chmod(script_path, 0o755)
+            print(f"  Build script saved to: {script_path}")
 
     print()
     if not args.dry_run:
         print("  To build the slimmed image, run:")
         print(f"    docker build -f {output_path} -t {args.image}-slim .")
     else:
-        print("  [Dry run] No image was built.")
+        print("  [Dry run] No files were written out.")
+        if output_path:
+            print("  Dockerfile preview:")
+            print("")
+            print(dockerfile)
 
 
 def cmd_compare(args):
@@ -167,8 +202,7 @@ def cmd_dockerfile(args):
             manifest = parser.parse_from_docker(args.image)
             analyzer = LayerAnalyzer(manifest)
             analysis = analyzer.analyze()
-            layer_sizes = {i: d.added_size for i, d in enumerate(analysis.layer_diffs)}
-            dfa.estimate_impact(dfa.instructions, layer_sizes)
+            dfa.estimate_impact(dfa.instructions, analysis.layer_diffs)
             print(dfa.generate_report())
         except Exception as e:
             print(f"  Warning: Could not analyze image: {e}")
@@ -229,11 +263,14 @@ Examples:
     p_optimize.add_argument("image", help="Docker image name or tar file path")
     p_optimize.add_argument("--tar", action="store_true", help="Treat image argument as tar file path")
     p_optimize.add_argument("--output", "-o", help="Output optimized Dockerfile path (default: Dockerfile.slim)")
+    p_optimize.add_argument("--output-tag", help="Output image tag for slimmed image (default: image:slim)")
     p_optimize.add_argument("--build-script", help="Generate a build script at given path")
     p_optimize.add_argument("--dry-run", action="store_true", help="Analyze only, do not generate files")
     p_optimize.add_argument("--exclude", "-e", nargs="+", help="Exclude files/directories (glob patterns)")
     p_optimize.add_argument("--exclude-node-modules", "--no-node-modules", action="store_true",
                             help="Exclude node_modules directories")
+    p_optimize.add_argument("--full-export", action="store_true",
+                            help="Generate a 4-stage export/cleanup/rebuild pipeline script")
     p_optimize.set_defaults(func=cmd_optimize)
 
     p_compare = subparsers.add_parser("compare", help="Compare original and slimmed images")

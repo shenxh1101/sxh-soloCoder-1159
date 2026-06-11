@@ -12,6 +12,7 @@ class LayerAnalysis:
         self.layer_diffs = []
         self.total_size = 0
         self.cumulative_sizes = []
+        self.deleted_file_history = []
 
 
 class LayerAnalyzer:
@@ -23,13 +24,15 @@ class LayerAnalyzer:
         result.layers = self.manifest.layers
 
         cumulative_state = {}
+        all_deleted = []
         for layer in self.manifest.layers:
             diff = self._compute_layer_diff(cumulative_state, layer)
             result.layer_diffs.append(diff)
+            all_deleted.append(diff.deleted)
 
             for path, size in diff.added.items():
                 cumulative_state[path] = size
-            for path in diff.modified:
+            for path, size in diff.modified.items():
                 cumulative_state[path] = diff.modified[path]
             for path in diff.deleted:
                 cumulative_state.pop(path, None)
@@ -38,6 +41,7 @@ class LayerAnalyzer:
             result.cumulative_sizes.append(cumulative_total)
 
         result.total_size = result.cumulative_sizes[-1] if result.cumulative_sizes else 0
+        result.deleted_file_history = all_deleted
         return result
 
     def _compute_layer_diff(self, previous_state: dict, layer: LayerInfo):
@@ -45,6 +49,11 @@ class LayerAnalyzer:
         diff.layer_index = layer.index
         diff.layer_id = layer.layer_id
         diff.created_by = layer.created_by
+
+        current_file_paths = set(layer.files.keys())
+        previous_paths = set(previous_state.keys())
+
+        diff.deleted = previous_paths - current_file_paths
 
         for path, size in layer.files.items():
             if path not in previous_state:
@@ -54,7 +63,6 @@ class LayerAnalyzer:
             else:
                 diff.unchanged[path] = size
 
-        current_paths = set(layer.files.keys())
         diff.added_dir_count = len(layer.dirs - set(previous_state.keys()))
 
         return diff
@@ -87,8 +95,12 @@ class LayerDiff:
     def added_file_count(self) -> int:
         return len(self.added)
 
+    @property
+    def deleted_file_count(self) -> int:
+        return len(self.deleted)
+
     def __repr__(self):
         return (
             f"LayerDiff(idx={self.layer_index}, added={len(self.added)} files, "
-            f"modified={len(self.modified)} files, added_size={self.added_size})"
+            f"deleted={len(self.deleted)} files, added_size={self.added_size})"
         )

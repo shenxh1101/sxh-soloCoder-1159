@@ -47,6 +47,9 @@ class TreeVisualizer:
 
             lines.append(f"{child_prefix}{_TREE_LAST}Files: {diff.added_file_count} added, "
                          f"{diff.added_dir_count} dirs")
+            if diff.deleted:
+                lines.append(f"{child_prefix}{_TREE_LAST}Deleted: {diff.deleted_file_count} files "
+                             f"removed from previous layers")
             lines.append(f"{child_prefix}{_TREE_LAST}Modified: {len(diff.modified)} files "
                          f"({format_size(diff.modified_size)})")
 
@@ -57,6 +60,14 @@ class TreeVisualizer:
                     sp = child_prefix + ("    " if is_last else _TREE_PIPE)
                     file_prefix = _TREE_LAST if j == len(top_files) - 1 else _TREE_BRANCH
                     lines.append(f"{sp}  {file_prefix}{path} ({format_size(size)})")
+
+            if diff.deleted and len(diff.deleted) <= 10:
+                lines.append(f"{child_prefix}{_TREE_LAST}Deleted files:")
+                deleted_list = sorted(diff.deleted)
+                for j, path in enumerate(deleted_list):
+                    sp = child_prefix + ("    " if is_last else _TREE_PIPE)
+                    file_prefix = _TREE_LAST if j == len(deleted_list) - 1 else _TREE_BRANCH
+                    lines.append(f"{sp}  {file_prefix}{path}")
 
             if diff.created_by:
                 lines.append(f"{child_prefix}{_TREE_LAST}Instruction: {diff.created_by.strip()}")
@@ -78,9 +89,10 @@ class TreeVisualizer:
     def render_summary_table(self) -> str:
         lines = []
         lines.append("")
-        lines.append("-" * 80)
-        lines.append(f"{'Layer':<8} {'Layer ID':<16} {'Added Size':<14} {'%':<7} {'Cumulative':<14} {'Files':<8}")
-        lines.append("-" * 80)
+        lines.append("-" * 100)
+        header = f"{'Layer':<6} {'Layer ID':<16} {'Added':<14} {'%':<7} {'Cumulative':<14} {'Files':<8} {'Deleted':<8}"
+        lines.append(header)
+        lines.append("-" * 100)
 
         for i, diff in enumerate(self.analysis.layer_diffs):
             layer = self.analysis.layers[i]
@@ -89,12 +101,13 @@ class TreeVisualizer:
             percent = (diff.added_size / self.analysis.total_size * 100) if self.analysis.total_size > 0 else 0
             cumulative = format_size(self.analysis.cumulative_sizes[i])
             files = str(diff.added_file_count)
+            deleted = str(diff.deleted_file_count) if diff.deleted else "0"
 
             lines.append(
-                f"{i:<8} {lid:<16} {added:<14} {percent:<6.1f}% {cumulative:<14} {files:<8}"
+                f"{i:<6} {lid:<16} {added:<14} {percent:<6.1f}% {cumulative:<14} {files:<8} {deleted:<8}"
             )
 
-        lines.append("-" * 80)
-        lines.append(f"{'Total':<8} {'':16} {format_size(self.analysis.total_size):<14}")
+        lines.append("-" * 100)
+        lines.append(f"{'Total':<6} {'':16} {format_size(self.analysis.total_size):<14}")
         lines.append("")
         return "\n".join(lines)

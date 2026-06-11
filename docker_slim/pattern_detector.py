@@ -2,7 +2,7 @@ import fnmatch
 import os
 from typing import Optional
 from docker_slim.layer_analyzer import LayerAnalysis, LayerDiff
-from docker_slim.utils import KNOWN_CACHE_PATTERNS, format_size, normalize_path
+from docker_slim.utils import KNOWN_CACHE_PATTERNS, format_size, normalize_path, matches_any_glob
 
 
 class PatternIssue:
@@ -27,6 +27,7 @@ class PatternDetector:
     def detect_all(self) -> list:
         self.issues = []
         self._detect_cache_files()
+        self._detect_add_delete_in_cross_layer()
         self._detect_add_delete_in_same_layer()
         self._detect_duplicate_files_across_layers()
         self._detect_large_packages()
@@ -55,10 +56,37 @@ class PatternDetector:
 
     def _matches_cache_pattern(self, path: str) -> bool:
         norm = normalize_path(path)
-        for pattern in KNOWN_CACHE_PATTERNS:
-            if fnmatch.fnmatch(norm, pattern) or norm.startswith(pattern.rstrip("/") + "/"):
-                return True
-        return False
+        return matches_any_glob(norm, KNOWN_CACHE_PATTERNS)
+
+    def _detect_add_delete_in_same_layer(self):
+        pass
+
+    def _detect_add_delete_in_cross_layer(self):
+        previous_files_by_layer = []
+        total_waste = 0
+        details = []
+
+        for i, diff in enumerate(self.analysis.layer_diffs):
+            for prev_i, prev_added in enumerate(previous_files_by_layer):
+                overlap = set(prev_added.keys()) & diff.deleted
+                if overlap:
+                    waste = sum(prev_added[p] for p in overlap)
+                    total_waste += waste
+                    if len(details) < 20:
+                        wasted_paths = sorted(overlap)[:5]
+                        details.append((prev_i, i, waste, wasted_paths))
+
+            previous_files_by_layer.append(diff.added)
+
+        if total_waste > 0:
+            self.issues.append(PatternIssue(
+                pattern_type="add_delete_cross_layer",
+                severity="high",
+                description=f"Files added then deleted across layers ({len(details)} occurrences) - consider merging layers",
+                layer_index=-1,
+                size_estimate=total_waste,
+                details=details,
+            ))
 
     def _detect_add_delete_in_same_layer(self):
         pass
@@ -127,7 +155,7 @@ class PatternDetector:
             total = 0
             for path, size in diff.added.items():
                 for up in unnecessary_patterns:
-                    if fnmatch.fnmatch(normalize_path(path), up):
+                    if matches_any_glob(normalize_path(path), [up]):
                         matched.append((path, size))
                         total += size
                         break

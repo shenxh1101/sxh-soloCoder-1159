@@ -1,3 +1,4 @@
+import fnmatch
 import json
 import os
 import subprocess
@@ -5,7 +6,7 @@ import tarfile
 import tempfile
 import shutil
 from typing import Optional
-from docker_slim.utils import normalize_path, is_dir, is_file, is_symlink
+from docker_slim.utils import normalize_path, is_dir, is_file, is_symlink, matches_any_glob
 
 
 class LayerInfo:
@@ -58,12 +59,7 @@ class ImageParser:
 
     def _should_exclude(self, path: str) -> bool:
         norm = normalize_path(path)
-        for pattern in self.exclude_patterns:
-            if pattern.endswith("/"):
-                pattern = pattern[:-1]
-            if norm == pattern or norm.startswith(pattern + "/") or norm.startswith(pattern):
-                return True
-        return False
+        return matches_any_glob(norm, self.exclude_patterns)
 
     def parse_from_tar(self, tar_path: str) -> ImageManifest:
         if not os.path.exists(tar_path):
@@ -133,7 +129,7 @@ class ImageParser:
                 layer_info.add_entry(member.name, member, member.size)
 
         json_path = tar_path.replace("layer.tar", "json")
-        if os.path.exists(json_path):
+        if json_path != tar_path and os.path.exists(json_path):
             with open(json_path, "r") as f:
                 layer_meta = json.load(f)
                 layer_info.created_by = layer_meta.get("created_by", "")

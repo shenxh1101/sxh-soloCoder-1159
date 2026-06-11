@@ -41,9 +41,12 @@ class Report:
         for i, diff in enumerate(self.analysis.layer_diffs):
             layer = self.analysis.layers[i]
             pct = (diff.added_size / self.analysis.total_size * 100) if self.analysis.total_size > 0 else 0
+            del_info = ""
+            if diff.deleted:
+                del_info = f" | deleted: {diff.deleted_file_count} files"
             lines.append(
                 f"  Layer {i}: +{format_size(diff.added_size)} ({pct:.1f}%) "
-                f"| {diff.added_file_count} new files | cum: {format_size(self.analysis.cumulative_sizes[i])}"
+                f"| {diff.added_file_count} new files{del_info} | cum: {format_size(self.analysis.cumulative_sizes[i])}"
             )
         lines.append("")
         return lines
@@ -73,9 +76,13 @@ class Report:
             if issue.details:
                 lines.append(f"      Top files/directories:")
                 for detail in issue.details[:5]:
-                    if isinstance(detail, tuple) and len(detail) >= 2:
-                        path, size = detail[0], detail[1]
-                        lines.append(f"        - {path} ({format_size(size)})")
+                    if isinstance(detail, tuple):
+                        if issue.pattern_type == "add_delete_cross_layer" and len(detail) == 4:
+                            prev_l, cur_l, waste, paths = detail
+                            lines.append(f"        - Layer {prev_l} -> Layer {cur_l}: waste {format_size(waste)} ({', '.join(paths[:3])})")
+                        elif len(detail) >= 2:
+                            path, size = detail[0], detail[1]
+                            lines.append(f"        - {path} ({format_size(size)})")
             lines.append("")
 
         return lines

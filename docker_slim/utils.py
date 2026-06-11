@@ -1,3 +1,4 @@
+import fnmatch
 import os
 import stat
 
@@ -29,6 +30,18 @@ def normalize_path(path: str) -> str:
     return os.path.normpath(path).replace("\\", "/").lstrip("/")
 
 
+def matches_any_glob(norm_path: str, patterns: list) -> bool:
+    for pattern in patterns:
+        if fnmatch.fnmatch(norm_path, pattern):
+            return True
+        pattern_no_trailing = pattern.rstrip("/")
+        if norm_path == pattern_no_trailing:
+            return True
+        if norm_path.startswith(pattern_no_trailing + "/"):
+            return True
+    return False
+
+
 DIFF_ADDED = "A"
 DIFF_MODIFIED = "M"
 DIFF_DELETED = "D"
@@ -58,6 +71,31 @@ KNOWN_CACHE_PATTERNS = [
     "/var/cache/ldconfig",
     "/usr/share/zoneinfo",
     "/usr/lib/gcc/**/include",
+    "**/.npm/_cacache/**",
+    "**/.npm_cache/**",
+    "**/node_modules/.cache/**",
+    "**/.cache/pip/**",
+    "**/.pip/cache/**",
+    "**/pip-cache/**",
+    "/root/.cache/pip",
+    "/home/*/.cache/pip",
+    "/root/.npm",
+    "/root/.npm/_cacache",
+    "/root/.cache/yarn",
+    "/home/*/.cache/yarn",
+    "/usr/local/share/.cache/yarn",
+    "/root/.gem",
+    "/home/*/.gem",
+    "/root/.cargo/registry",
+    "/home/*/.cargo/registry",
+    "/root/.nuget/packages",
+    "/home/*/.nuget/packages",
+    "/root/go/pkg/mod",
+    "/home/*/go/pkg/mod",
+    "/root/.m2/repository",
+    "/home/*/.m2/repository",
+    "/var/cache/debconf",
+    "/var/lib/apt/lists/partial",
 ]
 
 DEFAULT_EXCLUDE_PATTERNS = [

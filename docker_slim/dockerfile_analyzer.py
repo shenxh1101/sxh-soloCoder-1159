@@ -1,5 +1,5 @@
 import re
-from typing import Optional, List
+from typing import Optional, List, Dict
 from docker_slim.utils import format_size
 
 
@@ -10,10 +10,23 @@ class InstructionImpact:
         self.arguments = arguments
         self.estimated_size_added = 0
         self.layer_index = -1
+        self.matched = False
 
     @property
     def size_added_str(self) -> str:
-        return format_size(self.estimated_size_added)
+        if self.estimated_size_added == 0 and self.instruction in ("RUN", "COPY", "ADD"):
+            return "[UNMATCHED]"
+        if self.estimated_size_added > 0:
+            return format_size(self.estimated_size_added)
+        return "-"
+
+    @property
+    def label(self) -> str:
+        if self.layer_index >= 0:
+            return f"Layer {self.layer_index}"
+        if self.instruction in ("RUN", "COPY", "ADD"):
+            return "[MISSING]"
+        return "-"
 
 
 class DockerfileAnalyzer:
@@ -62,17 +75,28 @@ class DockerfileAnalyzer:
 
         return self.instructions
 
-    def estimate_impact(self, instructions: List[InstructionImpact], layer_sizes: dict) -> List[InstructionImpact]:
-        layer_idx = 0
-        impactful_instructions = ["RUN", "COPY", "ADD"]
+    def estimate_impact(self, instructions: List[InstructionImpact], layer_info_list: list) -> List[InstructionImpact]:
+        if not layer_info_list:
+            return self.instructions
 
-        for instr in instructions:
-            if instr.instruction in impactful_instructions and layer_idx < len(layer_sizes):
-                instr.estimated_size_added = layer_sizes.get(layer_idx, 0)
-                instr.layer_index = layer_idx
-                layer_idx += 1
+        impactful_instructions = ["RUN", "COPY", "ADD"]
+        layer_idx = 0
+        n_layers = len(layer_info_list)
+
+        for instr in self.instructions:
+            if instr.instruction in impactful_instructions:
+                if layer_idx < n_layers:
+                    diff = layer_info_list[layer_idx]
+                    instr.estimated_size_added = diff.added_size
+                    instr.layer_index = diff.layer_index
+                    instr.matched = True
+                    layer_idx += 1
+                else:
+                    instr.estimated_size_added = 0
+                    instr.layer_index = -1
+                    instr.matched = False
             elif instr.instruction == "FROM":
-                pass
+                instr.matched = True
             else:
                 instr.estimated_size_added = 0
         return self.instructions
@@ -80,27 +104,39 @@ class DockerfileAnalyzer:
     def generate_report(self) -> str:
         lines = []
         lines.append("")
-        lines.append("─" * 80)
+        lines.append("─" * 95)
         lines.append("  Dockerfile Instruction Impact Analysis")
-        lines.append("─" * 80)
+        lines.append("─" * 95)
         lines.append("")
-        lines.append(f"{'Line':<6} {'Instr':<10} {'Size Added':<12} {'Arguments'}")
-        lines.append("─" * 80)
+        lines.append(f"{'Line':<6} {'Instr':<10} {'Layer':<10} {'Size Added':<14} {'Arguments'}")
+        lines.append("─" * 95)
 
         for instr in self.instructions:
-            arg_short = (instr.arguments[:50] + "...") if len(instr.arguments) > 50 else instr.arguments
-            size_str = instr.size_added_str if instr.estimated_size_added > 0 else "-"
-            lines.append(f"{instr.line_num:<6} {instr.instruction:<10} {size_str:<12} {arg_short}")
+            arg_short = (instr.arguments[:55] + "...") if len(instr.arguments) > 55 else instr.arguments
+            size_str = instr.size_added_str
+            layer_label = instr.label
+            lines.append(f"{instr.line_num:<6} {instr.instruction:<10} {layer_label:<10} {size_str:<14} {arg_short}")
 
         lines.append("")
 
+        unmatched = [i for i in self.instructions if not i.matched and i.instruction in ("RUN", "COPY", "ADD")]
+        if unmatched:
+            lines.append("⚠️  WARNING: The following instructions could not be matched to image layers:")
+            for instr in unmatched:
+                lines.append(f"     Line {instr.line_num}: {instr.instruction} {instr.arguments[:60]}")
+            lines.append("     This may indicate the Dockerfile and image are out of sync.")
+            lines.append("")
+
         if self.instructions:
-            large = [i for i in self.instructions if i.estimated_size_added > 10 * 1024 * 1024]
-            if large:
-                lines.append("📊 Top 5 largest instructions:")
-                sorted_large = sorted(large, key=lambda x: x.estimated_size_added, reverse=True)[:5]
-                for i, instr in enumerate(sorted_large):
-                    lines.append(f"  {i+1}. Line {instr.line_num} [{instr.instruction}]: {instr.size_added_str}")
+            impactful = [i for i in self.instructions if i.estimated_size_added > 0]
+            if impactful:
+                lines.append("📊 Instruction impact ranking (by size added):")
+                sorted_impactful = sorted(impactful, key=lambda x: x.estimated_size_added, reverse=True)[:5]
+                for rank, instr in enumerate(sorted_impactful):
+                    lines.append(
+                        f"  {rank+1}. Line {instr.line_num} [{instr.instruction}] "
+                        f"-> Layer {instr.layer_index}: {instr.size_added_str}"
+                    )
                     lines.append(f"      → {instr.arguments[:80]}")
                 lines.append("")
 
